@@ -76,25 +76,19 @@ def check_and_install_dependencies():
     # Check for SoX
     sox_available = check_sox()
     if not sox_available:
-        print("⚠️ SoX not found. Installing...")
-        try:
-            # Try to install SoX with pip first
-            subprocess.run([sys.executable, "-m", "pip", "install", "sox"], check=True)
-            print("✅ SoX installed via pip")
-        except subprocess.CalledProcessError:
-            # If pip install fails, try platform-specific methods
-            if os.name == "nt":  # Windows
-                print("⚠️ Installing SoX via chocolatey (may require admin)...")
-                try:
-                    subprocess.run(["choco", "install", "sox.portable", "-y"], check=True)
-                    print("✅ SoX installed via chocolatey")
-                except (subprocess.CalledProcessError, FileNotFoundError):
-                    print("❌ SoX installation failed. Please install manually from:")
-                    print("   http://sox.sourceforge.net/")
-            else:  # Linux/Mac
-                print("⚠️ Please install SoX using your package manager:")
-                print("   Linux: sudo apt-get install sox")
-                print("   Mac: brew install sox")
+        print("⚠️ SoX not found (optional - only needed for audio processing)")
+        print("   Note: Manim will work without SoX for video generation")
+        if os.name == "nt":  # Windows
+            print("   To install SoX on Windows:")
+            print("   1. Download from: https://sourceforge.net/projects/sox/files/sox/14.4.2/")
+            print("   2. Extract and add to PATH")
+            print("   OR use Chocolatey: choco install sox.portable")
+        else:  # Linux/Mac
+            print("   To install SoX:")
+            print("   Linux: sudo apt-get install sox")
+            print("   Mac: brew install sox")
+    else:
+        print("✅ SoX is available")
     
     print("✅ Dependency check completed")
 
@@ -645,8 +639,17 @@ if __name__ == "__main__":
     # Check and install dependencies
     check_and_install_dependencies()
     
-    print(f"🎬 FFmpeg available: {FFMPEG_AVAILABLE}")
-    print(f"🎵 SoX available: {check_sox()}")
+    sox_status = "✅ Available" if check_sox() else "⚠️ Not found (optional)"
+    ffmpeg_status = "✅ Available" if FFMPEG_AVAILABLE else "❌ Not found (required)"
+    
+    print(f"🎬 FFmpeg: {ffmpeg_status}")
+    print(f"🎵 SoX: {sox_status}")
+    
+    if not FFMPEG_AVAILABLE:
+        print("\n⚠️ WARNING: FFmpeg is required for video generation!")
+        print("   Please install FFmpeg from: https://ffmpeg.org/download.html")
+    
+    print("\n✅ Starting server...")
     
     uvicorn.run(
         app,

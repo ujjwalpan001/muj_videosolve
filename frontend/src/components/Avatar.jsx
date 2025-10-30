@@ -86,7 +86,8 @@ const facialExpressions = {
   },
 };
 
-const corresponding = {
+// Viseme mapping - will be validated against actual model morph targets
+let corresponding = {
   A: "viseme_PP",
   B: "viseme_kk",
   C: "viseme_I",
@@ -98,12 +99,45 @@ const corresponding = {
   X: "viseme_PP",
 };
 
+// Track validated visemes to avoid repeated warnings
+let validatedVisemes = new Set();
+let invalidVisemes = new Set();
+
 let setupMode = false;
 
 export function Avatar(props) {
   const { nodes, materials, scene } = useGLTF(
     "/models/68a8184c78a54f62ce4e9d73.glb"
   );
+
+  // Suppress THREE.PropertyBinding warnings for missing nodes
+  React.useEffect(() => {
+    const originalWarn = console.warn;
+    const originalError = console.error;
+    
+    console.warn = (...args) => {
+      const message = args[0]?.toString() || '';
+      // Filter out PropertyBinding warnings - we handle this with our own filtering
+      if (message.includes('PropertyBinding') || message.includes('Trying to update node')) {
+        return;
+      }
+      originalWarn.apply(console, args);
+    };
+    
+    console.error = (...args) => {
+      const message = args[0]?.toString() || '';
+      // Filter out PropertyBinding errors - we handle this with our own filtering
+      if (message.includes('PropertyBinding') || message.includes('Trying to update node')) {
+        return;
+      }
+      originalError.apply(console, args);
+    };
+    
+    return () => {
+      console.warn = originalWarn;
+      console.error = originalError;
+    };
+  }, []);
 
   const { message, onMessagePlayed, chat, getVideoSyncState } = useChat();
 
@@ -319,12 +353,59 @@ export function Avatar(props) {
     }
   }, [videoSyncMode, currentVideoSessionId, getVideoSyncState, message]);
 
-  const { animations } = useGLTF("/models/animations.glb");
+  const { animations: rawAnimations } = useGLTF("/models/animations.glb");
 
   const group = useRef();
+  
+  // Filter animation tracks to only include those that reference existing nodes in the model
+  const animations = React.useMemo(() => {
+    if (!scene || !rawAnimations) return rawAnimations;
+    
+    // Build a set of all node names in the scene for faster lookup
+    const nodeNames = new Set();
+    const boneNodes = [];
+    scene.traverse((child) => {
+      nodeNames.add(child.name);
+      if (child.isBone) {
+        boneNodes.push(child.name);
+      }
+    });
+    
+    // Only log once on initial load
+    if (boneNodes.length > 0) {
+      console.log(`✅ Avatar skeleton: ${boneNodes.length} bones loaded`);
+    }
+    
+    let totalFiltered = 0;
+    const processedAnimations = rawAnimations.map((clip) => {
+      // Clone the animation clip
+      const filteredClip = clip.clone();
+      
+      // Filter out tracks that reference non-existent nodes
+      const originalTrackCount = clip.tracks.length;
+      filteredClip.tracks = clip.tracks.filter((track) => {
+        const nodeName = track.name.split('.')[0];
+        return nodeNames.has(nodeName);
+      });
+      
+      totalFiltered += (originalTrackCount - filteredClip.tracks.length);
+      
+      return filteredClip;
+    });
+    
+    // Single summary log for all animations
+    if (totalFiltered > 0) {
+      console.log(`🔧 Animations: ${rawAnimations.length} loaded, ${totalFiltered} incompatible tracks filtered`);
+    } else {
+      console.log(`✅ Animations: ${rawAnimations.length} loaded, all tracks compatible`);
+    }
+    
+    return processedAnimations;
+  }, [scene, rawAnimations]);
+  
   const { actions, mixer } = useAnimations(animations, group);
   const [animation, setAnimation] = useState(
-    animations.find((a) => a.name === "Idle") ? "Idle" : animations[0].name
+    animations && animations.length > 0 && animations.find((a) => a.name === "Idle") ? "Idle" : (animations && animations.length > 0 ? animations[0].name : "Idle")
   );
   useEffect(() => {
     if (actions[animation]) {
@@ -341,6 +422,12 @@ export function Avatar(props) {
   }, [animation]);
 
   const lerpMorphTarget = (target, value, speed = 0.1) => {
+    // Skip if we know this target is invalid
+    if (invalidVisemes.has(target)) {
+      return;
+    }
+
+    let targetFound = false;
     scene.traverse((child) => {
       if (child.isSkinnedMesh && child.morphTargetDictionary) {
         const index = child.morphTargetDictionary[target];
@@ -348,21 +435,40 @@ export function Avatar(props) {
           index === undefined ||
           child.morphTargetInfluences[index] === undefined
         ) {
-          console.warn(`Morph target ${target} not found on ${child.name}`);
+          // Only warn once per missing target, and only for important meshes
+          if (!invalidVisemes.has(target) && (child.name === "Wolf3D_Head" || child.name === "Wolf3D_Teeth")) {
+            console.warn(`Morph target ${target} not found on ${child.name}`);
+            invalidVisemes.add(target);
+            
+            // Log available morph targets once for debugging
+            if (child.name === "Wolf3D_Head" && validatedVisemes.size === 0) {
+              console.log("Available morph targets on Wolf3D_Head:", Object.keys(child.morphTargetDictionary));
+            }
+          } else {
+            // Silently add to invalid set for eye meshes
+            invalidVisemes.add(target);
+          }
           return;
         }
+        
+        targetFound = true;
+        validatedVisemes.add(target);
+        
         child.morphTargetInfluences[index] = THREE.MathUtils.lerp(
           child.morphTargetInfluences[index],
           value,
           speed
         );
 
-        if (!setupMode) {
+        // Only update Leva controls in setup mode and if target was found
+        if (!setupMode && targetFound) {
           try {
             set({
               [target]: value,
             });
-          } catch (e) {}
+          } catch (e) {
+            // Silently ignore Leva control update errors
+          }
         }
       }
     });
@@ -435,9 +541,9 @@ export function Avatar(props) {
       }
     }
 
-    // Reset unused visemes
+    // Reset unused visemes (only valid ones)
     Object.values(corresponding).forEach((value) => {
-      if (appliedMorphTargets.includes(value)) {
+      if (appliedMorphTargets.includes(value) || invalidVisemes.has(value)) {
         return;
       }
       lerpMorphTarget(value, 0, 0.1);
