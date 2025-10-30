@@ -1,0 +1,9 @@
+{
+  "dependencies": {
+    "@clerk/clerk-react": "^5.53.4",
+    "convex": "^1.28.0"
+  },
+  "devDependencies": {
+    "@convex-dev/auth": "^0.0.90"
+  }
+}

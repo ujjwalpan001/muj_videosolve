@@ -13,3 +13,5 @@ uploads/videos/
 
 gen-lang-client-0984354674-ea557af59d84.json
 backend/.env
+
+.env.local

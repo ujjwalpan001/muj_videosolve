@@ -55,7 +55,12 @@ export const Experience = () => {
   return (
     <>
       <CameraControls ref={cameraControls} />
-      <Environment preset="sunset" />
+      {/* Simple lighting instead of HDR environment to avoid rate limiting */}
+      <ambientLight intensity={0.5} />
+      <directionalLight position={[5, 5, 5]} intensity={1} castShadow />
+      <directionalLight position={[-5, 5, -5]} intensity={0.5} />
+      <hemisphereLight intensity={0.3} />
+      
       {/* Wrapping Dots into Suspense to prevent Blink when Troika/Font is loaded */}
       <Suspense>
         <Dots position-y={1.75} position-x={-0.02} />

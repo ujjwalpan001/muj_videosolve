@@ -407,7 +407,19 @@ export function Avatar(props) {
   const [animation, setAnimation] = useState(
     animations && animations.length > 0 && animations.find((a) => a.name === "Idle") ? "Idle" : (animations && animations.length > 0 ? animations[0].name : "Idle")
   );
+  
+  // Ensure Idle animation plays on first load
   useEffect(() => {
+    if (actions && Object.keys(actions).length > 0 && !message) {
+      console.log("🎬 Avatar mounted - playing Idle animation");
+      if (actions["Idle"]) {
+        actions["Idle"].reset().fadeIn(0).play();
+      }
+    }
+  }, [actions, message]);
+  
+  useEffect(() => {
+    console.log("🎬 Animation changed to:", animation);
     if (actions[animation]) {
       actions[animation]
         .reset()
@@ -418,8 +430,10 @@ export function Avatar(props) {
           actions[animation].fadeOut(0.5);
         }
       };
+    } else {
+      console.warn(`⚠️ Animation "${animation}" not found in actions`);
     }
-  }, [animation]);
+  }, [animation, actions, mixer]);
 
   const lerpMorphTarget = (target, value, speed = 0.1) => {
     // Skip if we know this target is invalid
