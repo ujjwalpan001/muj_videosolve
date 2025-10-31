@@ -15,9 +15,10 @@ export default function ChatHistory({
   currentSessionId, 
   onNewChat, 
   onSelectSession,
-  onShowVideoLibrary 
+  onShowVideoLibrary,
+  isExpanded,
+  setIsExpanded
 }) {
-  const [isExpanded, setIsExpanded] = useState(true);
   const [showVideoLibrary, setShowVideoLibrary] = useState(false);
 
   // Query sessions from Convex
@@ -62,22 +63,15 @@ export default function ChatHistory({
     return session.title || session.firstMessage || 'New conversation';
   };
 
-  if (!isExpanded) {
-    return (
-      <div className="absolute left-0 top-0 bottom-0 z-10 flex items-center">
-        <button
-          onClick={() => setIsExpanded(true)}
-          className="bg-slate-800/90 hover:bg-slate-700/90 backdrop-blur-sm text-white p-2 rounded-r-lg shadow-lg transition-all duration-200 border-r border-t border-b border-slate-600/50"
-          title="Expand sidebar"
-        >
-          <ChevronRightIcon className="w-5 h-5" />
-        </button>
-      </div>
-    );
-  }
-
   return (
-    <div className="absolute left-0 top-0 bottom-0 w-72 bg-slate-900/95 backdrop-blur-xl border-r border-slate-700/50 z-10 flex flex-col shadow-2xl">
+    <div 
+      className={`
+        fixed left-0 top-0 bottom-0 bg-slate-900/95 backdrop-blur-xl border-r border-slate-700/50 z-10 flex flex-col shadow-2xl
+        transition-transform duration-300 ease-in-out
+        ${isExpanded ? 'translate-x-0' : '-translate-x-full'}
+      `}
+      style={{ width: '288px' }}
+    >
       {/* Header */}
       <div className="flex items-center justify-between p-4 border-b border-slate-700/50">
         <h2 className="text-lg font-semibold text-white flex items-center gap-2">

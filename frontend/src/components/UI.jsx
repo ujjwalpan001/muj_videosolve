@@ -28,6 +28,7 @@ export const UI = ({ hidden, showControls = true, showChat = true, ...props }) =
   const [expandedVideo, setExpandedVideo] = useState(null);
   const [expandedVideoSessionId, setExpandedVideoSessionId] = useState(null);
   const [showVideoLibrary, setShowVideoLibrary] = useState(false);
+  const [isSidebarExpanded, setIsSidebarExpanded] = useState(true);
   const recognition = useRef(null);
 
   // Initialize Web Speech API
@@ -180,6 +181,17 @@ export const UI = ({ hidden, showControls = true, showChat = true, ...props }) =
 
   return (
     <div className="relative h-full">
+      {/* Sidebar Toggle Button - Top Left */}
+      <button
+        onClick={() => setIsSidebarExpanded(!isSidebarExpanded)}
+        className="fixed left-4 top-4 z-50 bg-slate-800/90 hover:bg-slate-700/90 backdrop-blur-sm text-white p-2.5 rounded-lg shadow-lg transition-all duration-200 border border-slate-600/50"
+        title={isSidebarExpanded ? "Hide sidebar" : "Show sidebar"}
+      >
+        <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-5 h-5">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M3.75 6.75h16.5M3.75 12h16.5m-16.5 5.25h16.5" />
+        </svg>
+      </button>
+
       {showControls && (
         <button
           onClick={() => setCameraZoomed(!cameraZoomed)}
@@ -198,13 +210,20 @@ export const UI = ({ hidden, showControls = true, showChat = true, ...props }) =
       )}
 
       {showChat && (
-        <div className="h-full flex flex-col relative">
+        <div 
+          className="h-full flex flex-col relative transition-all duration-300"
+          style={{
+            marginLeft: isSidebarExpanded ? '288px' : '0px'
+          }}
+        >
           {/* ChatGPT-Style Sidebar */}
           <ChatHistory
             currentSessionId={currentSessionId}
             onNewChat={handleNewChat}
             onSelectSession={handleSelectSession}
             onShowVideoLibrary={handleShowVideoLibrary}
+            isExpanded={isSidebarExpanded}
+            setIsExpanded={setIsSidebarExpanded}
           />
 
           <motion.button
