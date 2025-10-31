@@ -8,6 +8,7 @@ import OpenAI from "openai";
 import path from "path";
 import { promisify } from "util";
 import { TextToSpeechClient } from "@google-cloud/text-to-speech";
+import { uploadVideo } from "./storage.js";
 
 // Convert exec to use promises
 const execPromise = promisify(exec);
@@ -299,10 +300,12 @@ app.post("/chat", async (req, res) => {
   const userMessage = req.body.message;
   const videoMode = req.body.videoMode || false;
   const sessionId = req.body.sessionId || `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  const userId = req.body.userId || 'default-user';
   
   console.log("User Message:", userMessage);
   console.log("Video Mode:", videoMode);
   console.log("Session ID:", sessionId);
+  console.log("User ID:", userId);
 
   if (!userMessage) {
     try {
@@ -755,6 +758,9 @@ app.post("/chat", async (req, res) => {
     if (videoMode) {
       console.log(`🎬 Starting background video generation for ${messages.length} messages...`);
       
+      // Capture userId for background process
+      const capturedUserId = userId;
+      
       // Generate videos in background without blocking the response
       setImmediate(async () => {
         try {
@@ -799,14 +805,30 @@ app.post("/chat", async (req, res) => {
               if (combinedVideoResult && combinedVideoResult.success) {
                 console.log(`✅ Background final combined video created: ${combinedVideoResult.videoUrl}`);
                 
+                // Upload to Google Cloud Storage
+                let finalVideoUrl = combinedVideoResult.videoUrl;
+                try {
+                  console.log(`☁️ Uploading video to Google Cloud Storage for user: ${capturedUserId}...`);
+                  const gcsUrl = await uploadVideo(
+                    combinedVideoResult.videoPath,
+                    capturedUserId,
+                    sessionId
+                  );
+                  finalVideoUrl = gcsUrl;
+                  console.log(`✅ Video uploaded to cloud: ${gcsUrl}`);
+                } catch (uploadError) {
+                  console.error(`⚠️ Cloud upload failed, using local URL:`, uploadError.message);
+                  // Fall back to local URL if upload fails
+                }
+                
                 // Store the completed video for frontend pickup
                 videoGenerationStore.set(sessionId, {
-                  videoUrl: combinedVideoResult.videoUrl,
+                  videoUrl: finalVideoUrl, // Use GCS URL if available, otherwise local
                   videoPath: combinedVideoResult.videoPath,
                   timestamp: Date.now()
                 });
                 
-                console.log(`📹 Combined video stored for session ${sessionId}: ${combinedVideoResult.videoUrl}`);
+                console.log(`📹 Combined video stored for session ${sessionId}: ${finalVideoUrl}`);
               } else {
                 console.log(`⚠️ Background video combination failed`);
               }
@@ -821,6 +843,182 @@ app.post("/chat", async (req, res) => {
     }
   } catch (error) {
     console.error("Error in /chat endpoint:", error.message);
+    res.status(500).send({ error: "Failed to process chat request" });
+  }
+});
+
+// Chat endpoint with sessionId in URL - for RESTful API
+app.post("/chat/:sessionId", async (req, res) => {
+  const userMessage = req.body.message;
+  const videoMode = req.body.videoMode || false;
+  const sessionId = req.params.sessionId; // Get from URL params
+  const userId = req.body.userId || 'default-user';
+  
+  console.log("📝 Chat Request - Session URL:", sessionId);
+  console.log("User Message:", userMessage);
+  console.log("Video Mode:", videoMode);
+  console.log("User ID:", userId);
+
+  if (!userMessage) {
+    try {
+      res.send({
+        messages: [
+          {
+            text: "My darling, I'm here waiting to hear your heart's whispers. Speak to me?",
+            audio: await audioFileToBase64("audios/intro_0.json"),
+            lipsync: await readJsonTranscript("audios/intro_0.json"),
+            facialExpression: "default",
+            animation: "Idle",
+          },
+        ],
+      });
+    } catch (error) {
+      console.error("Error preparing initial message:", error.message);
+      res.status(500).send({ error: "Failed to load initial message" });
+    }
+    return;
+  }
+
+  try {
+    // Rest of the logic is same as /chat endpoint
+    // This allows using both /chat and /chat/:sessionId
+    const chatHistory = req.body.chatHistory || [];
+    
+    const systemPrompt = `You are a helpful, empathetic AI tutor. ${videoMode 
+      ? "The user wants a video explanation with animations. Provide clear step-by-step explanations suitable for visualization."
+      : "Provide clear, concise responses."}`;
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      ...chatHistory,
+      { role: "user", content: userMessage }
+    ];
+
+    const completion = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      messages: messages,
+      temperature: 0.7,
+    });
+
+    const chatResponse = completion.choices[0].message.content;
+
+    const response = {
+      messages: [
+        {
+          text: chatResponse,
+          facialExpression: "default",
+          animation: "Talking",
+        },
+      ],
+    };
+
+    // Audio and lipsync generation
+    const startAudioGen = Date.now();
+    const audioData = await generateAudioAndLipsync(chatResponse, sessionId);
+    const audioGenTime = Date.now() - startAudioGen;
+    console.log(`✅ Audio generation completed in ${audioGenTime}ms`);
+
+    response.messages[0].audio = audioData.audioBase64;
+    response.messages[0].lipsync = audioData.lipsync;
+
+    if (videoMode) {
+      response.messages[0].videoGenerating = true;
+      response.sessionId = sessionId;
+      
+      // Immediately return response to frontend
+      res.send(response);
+
+      // Start background video generation
+      const capturedUserId = userId;
+      setImmediate(async () => {
+        try {
+          console.log("🎬 Starting background video generation for session:", sessionId);
+          
+          const videoExplanation = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              {
+                role: "system",
+                content: "Generate a detailed explanation perfect for educational video visualization. Include step-by-step breakdowns, key concepts, and visual descriptions."
+              },
+              { role: "user", content: userMessage }
+            ],
+          });
+
+          const manimCodePrompt = `Create a Python Manim animation script for this explanation:\n\n${videoExplanation.choices[0].message.content}\n\nRequirements:\n- Use simple, clear visualizations\n- Include step-by-step animations\n- Add text labels and equations\n- Use colors for emphasis\n- Keep it educational and engaging`;
+
+          const manimCompletion = await openai.chat.completions.create({
+            model: "gpt-4o-mini",
+            messages: [
+              { role: "system", content: "You are a Manim animation expert. Generate clean, working Manim code." },
+              { role: "user", content: manimCodePrompt }
+            ],
+          });
+
+          const manimCodeRaw = manimCompletion.choices[0].message.content;
+          let manimCode = manimCodeRaw.replace(/```python\n?/g, '').replace(/```\n?/g, '').trim();
+
+          console.log("📝 Generated Manim code, sending to worker...");
+
+          const manimResult = await fetch('http://127.0.0.1:8001/generate', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              code: manimCode,
+              session_id: sessionId,
+            }),
+          });
+
+          if (!manimResult.ok) {
+            throw new Error(`Manim worker returned ${manimResult.status}`);
+          }
+
+          const manimResponse = await manimResult.json();
+          console.log("🎬 Manim worker response:", manimResponse);
+
+          if (manimResponse.video_path) {
+            const videoResult = await combineVideos(
+              manimResponse.video_path,
+              audioData.audioPath,
+              sessionId
+            );
+
+            if (videoResult.success && videoResult.videoPath) {
+              console.log("✅ Video generated successfully:", videoResult.videoPath);
+              
+              // Upload to GCS
+              try {
+                console.log("☁️ Uploading video to Google Cloud Storage...");
+                const gcsUrl = await uploadVideo(videoResult.videoPath, capturedUserId, sessionId);
+                console.log("✅ Video uploaded to GCS:", gcsUrl);
+                
+                videoGenerationStore.set(sessionId, {
+                  videoUrl: gcsUrl, // Use GCS URL
+                  videoPath: videoResult.videoPath,
+                  timestamp: Date.now()
+                });
+              } catch (uploadError) {
+                console.error("❌ GCS upload failed, using local URL:", uploadError.message);
+                // Fallback to local URL if upload fails
+                const localUrl = `http://localhost:3001${videoResult.videoPath.replace(path.join(process.cwd(), '..'), '')}`;
+                videoGenerationStore.set(sessionId, {
+                  videoUrl: localUrl,
+                  videoPath: videoResult.videoPath,
+                  timestamp: Date.now()
+                });
+              }
+            }
+          }
+        } catch (error) {
+          console.error(`❌ Background video generation failed:`, error.message);
+        }
+      });
+    } else {
+      // Text-only mode
+      res.send(response);
+    }
+  } catch (error) {
+    console.error("Error in /chat/:sessionId endpoint:", error.message);
     res.status(500).send({ error: "Failed to process chat request" });
   }
 });

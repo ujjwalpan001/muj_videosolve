@@ -1,4 +1,8 @@
 import { createContext, useContext, useEffect, useState } from "react";
+import { useMutation, useQuery } from "convex/react";
+import { api } from "../../../convex/_generated/api";
+import { sessionHelpers, messageHelpers } from "../lib/convexHelpers";
+import { useUser, useAuth } from "@clerk/clerk-react";
 
 const backendUrl = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
@@ -7,9 +11,93 @@ const ChatContext = createContext();
 export const ChatProvider = ({ children }) => {
   const [videoPolling, setVideoPolling] = useState(new Map()); // Track polling for each session
   const [videoSyncState, setVideoSyncState] = useState(new Map()); // Track video sync state
+  const [currentSessionId, setCurrentSessionId] = useState(null); // Track current session (string ID)
+  const [currentConvexSessionId, setCurrentConvexSessionId] = useState(null); // Track Convex _id
+  const [convexMessageIds, setConvexMessageIds] = useState(new Map()); // Map sessionId -> messageId
+  
+  // Get Clerk user ID and auth status
+  const { user } = useUser();
+  const { isLoaded, isSignedIn, getToken } = useAuth();
+  const userId = user?.id || 'default-user';
+  
+  // Debug: Log user authentication status
+  useEffect(() => {
+    console.log("🔐 Clerk Auth Status:", {
+      isLoaded,
+      isSignedIn,
+      isAuthenticated: !!user,
+      userId: user?.id,
+      email: user?.primaryEmailAddress?.emailAddress
+    });
+    
+    // Test getting token
+    if (isSignedIn && getToken) {
+      getToken({ template: "convex" }).then(token => {
+        console.log("🎫 Clerk Token (first 50 chars):", token?.substring(0, 50));
+      }).catch(err => {
+        console.error("❌ Failed to get Clerk token:", err);
+      });
+    }
+  }, [user, isLoaded, isSignedIn, getToken]);
+  
+  // Convex mutations
+  const createSession = useMutation(api.sessions.createSession);
+  const createMessage = useMutation(api.messages.createMessage);
+  const updateMessage = useMutation(api.messages.updateMessage);
   
   const chat = async (message, videoMode = false) => {
     setLoading(true);
+    
+    // Generate or reuse session ID for this conversation
+    let sessionId = currentSessionId;
+    let convexSessionId = currentConvexSessionId;
+    
+    if (!sessionId) {
+      sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      setCurrentSessionId(sessionId);
+      
+      // Create session in Convex
+      try {
+        console.log("📝 Creating new session in Convex...", {
+          sessionId,
+          mode: videoMode ? 'video' : 'chat',
+          userId
+        });
+        const sessionArgs = sessionHelpers.createSessionArgs(sessionId, videoMode ? 'video' : 'chat');
+        console.log("📦 Session args:", sessionArgs);
+        convexSessionId = await createSession(sessionArgs);
+        setCurrentConvexSessionId(convexSessionId);
+        console.log("✅ Session created in Convex with _id:", convexSessionId);
+      } catch (error) {
+        console.error("❌ Error creating session:", error);
+        console.error("Error details:", error.message, error.stack);
+      }
+    }
+    
+    console.log("💾 Saving user message to Convex...", { sessionId, convexSessionId, message });
+    
+    // Save user message to Convex
+    let userMessageId = null;
+    if (convexSessionId) {
+      try {
+        const userMessageArgs = {
+          sessionId: convexSessionId, // Use Convex _id, not string
+          type: "user",
+          text: message,
+          videoStatus: "none",
+          facialExpression: "default",
+          animation: "Idle"
+        };
+        console.log("📦 User message args:", userMessageArgs);
+        userMessageId = await createMessage(userMessageArgs);
+        console.log("✅ User message saved to Convex with ID:", userMessageId);
+      } catch (error) {
+        console.error("❌ Error saving user message:", error);
+        console.error("Error details:", error.message, error.stack);
+      }
+    } else {
+      console.warn("⚠️ No Convex session ID available, skipping message save");
+    }
     
     // Prepare chat history for context (last 10 messages to avoid token limit)
     const recentHistory = chatHistory.slice(-10).map(msg => ({
@@ -20,9 +108,6 @@ export const ChatProvider = ({ children }) => {
     // Add user message to chat history immediately
     setChatHistory(prev => [...prev, { type: 'user', text: message }]);
     
-    // Generate session ID for this conversation
-    const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    
     const data = await fetch(`${backendUrl}/chat`, {
       method: "POST",
       headers: {
@@ -32,6 +117,7 @@ export const ChatProvider = ({ children }) => {
         message, 
         videoMode, 
         sessionId,
+        userId,  // Send Clerk user ID to backend
         chatHistory: recentHistory // Include recent chat history for context
       }),
     });
@@ -46,6 +132,42 @@ export const ChatProvider = ({ children }) => {
       hasLipsync: resp[0]?.lipsync ? 'yes' : 'none',
       animationTimeline: resp[0]?.animationTimeline || 'none'
     });
+    
+    // Save assistant messages to Convex
+    console.log("💾 Saving assistant messages to Convex:", resp.length);
+    let assistantMessageId = null;
+    if (convexSessionId) {
+      try {
+        for (const msg of resp) {
+          const assistantMessageArgs = {
+            sessionId: convexSessionId, // Use Convex _id
+            type: "assistant",
+            text: msg.text || msg.chatResponse,
+            videoExplanation: msg.videoExplanation,
+            manimCode: msg.manimCode,
+            videoStatus: msg.videoExplanation ? "pending" : "none",
+            facialExpression: msg.facialExpression || "default",
+            animation: msg.animation || "Idle",
+            animationTimeline: msg.animationTimeline,
+            lipsyncData: msg.lipsync,
+            tokenUsage: msg.tokenUsage,
+            processingTime: msg.processingTime
+          };
+          assistantMessageId = await createMessage(assistantMessageArgs);
+          console.log("✅ Assistant message saved to Convex with ID:", assistantMessageId);
+          
+          // Store message ID if this message will have a video
+          if (msg.videoExplanation) {
+            setConvexMessageIds(prev => new Map(prev).set(sessionId, assistantMessageId));
+          }
+        }
+      } catch (error) {
+        console.error("❌ Error saving assistant messages:", error);
+        console.error("Error details:", error.message, error.stack);
+      }
+    } else {
+      console.warn("⚠️ No Convex session ID available, skipping assistant message save");
+    }
     
     // Process bot response and add to chat history immediately
     if (videoMode && resp.length > 0) {
@@ -114,6 +236,19 @@ export const ChatProvider = ({ children }) => {
         
         if (videoData.ready) {
           console.log(`✅ Video ready for session ${sessionId}: ${videoData.videoUrl}`);
+          
+          // Update Convex message with video URL
+          console.log("💾 Updating Convex with video URL");
+          const messageId = convexMessageIds.get(sessionId);
+          if (messageId) {
+            try {
+              const updateArgs = messageHelpers.updateVideoArgs(messageId, videoData.videoUrl, "ready");
+              await updateMessage(updateArgs);
+              console.log("✅ Video URL saved to Convex");
+            } catch (error) {
+              console.error("❌ Error updating video URL in Convex:", error);
+            }
+          }
           
           // Update the chat history to include the video
           setChatHistory(prev => prev.map(msg => 
@@ -233,6 +368,82 @@ export const ChatProvider = ({ children }) => {
     }
   }, [messages]);
 
+  // Load session messages from Convex
+  const loadSessionMessages = async (sessionId) => {
+    try {
+      console.log('🔍 Fetching messages for session:', sessionId);
+      
+      // Get Clerk token for authentication
+      const token = await getToken({ template: "convex" });
+      
+      // Fetch messages from Convex using the sessionId string
+      const messagesResponse = await fetch(`${import.meta.env.VITE_CONVEX_URL}/api/query`, {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          path: 'messages:getMessagesBySessionId',
+          args: { sessionId }
+        })
+      });
+
+      const messages = await messagesResponse.json();
+      console.log('📥 Loaded messages:', messages?.length || 0, messages);
+
+      if (messages && messages.length > 0) {
+        // Transform Convex messages to chat history format
+        const formattedHistory = messages.map(msg => ({
+          type: msg.type, // "user" or "assistant"
+          text: msg.text,
+          videoUrl: msg.videoUrl,
+          videoGenerating: msg.videoStatus === "generating" || msg.videoStatus === "pending",
+          facialExpression: msg.facialExpression,
+          animation: msg.animation,
+          lipsync: msg.lipsyncData,
+          audio: null // Audio would need to be re-fetched if needed
+        }));
+
+        setChatHistory(formattedHistory);
+        
+        // Find the Convex session _id from the session string ID
+        const sessionResponse = await fetch(`${import.meta.env.VITE_CONVEX_URL}/api/query`, {
+          method: 'POST',
+          headers: { 
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${token}`
+          },
+          body: JSON.stringify({
+            path: 'sessions:getSessionBySessionId',
+            args: { sessionId }
+          })
+        });
+
+        const sessionData = await sessionResponse.json();
+
+        if (sessionData?._id) {
+          setCurrentSessionId(sessionId);
+          setCurrentConvexSessionId(sessionData._id);
+          console.log('✅ Session loaded:', { 
+            sessionId, 
+            convexId: sessionData._id, 
+            messageCount: messages.length 
+          });
+        }
+      } else {
+        // Empty session or no messages yet
+        setCurrentSessionId(sessionId);
+        setCurrentConvexSessionId(null);
+        setChatHistory([]);
+        console.log('📭 Empty session selected');
+      }
+    } catch (error) {
+      console.error('❌ Error loading session messages:', error);
+      throw error; // Re-throw so UI can handle it
+    }
+  };
+
   return (
     <ChatContext.Provider
       value={{
@@ -247,7 +458,13 @@ export const ChatProvider = ({ children }) => {
         handleVideoPause,
         handleVideoSeek,
         handleVideoEnd,
-        getVideoSyncState
+        getVideoSyncState,
+        currentSessionId,
+        setCurrentSessionId,
+        currentConvexSessionId,
+        setCurrentConvexSessionId,
+        setChatHistory,
+        loadSessionMessages
       }}
     >
       {children}

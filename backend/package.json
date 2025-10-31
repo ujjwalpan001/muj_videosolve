@@ -10,6 +10,7 @@
   },
   "author": "Ujjawal Pandey.dev>",
   "dependencies": {
+    "@google-cloud/storage": "^7.17.2",
     "@google-cloud/text-to-speech": "^6.4.0",
     "@google/generative-ai": "^0.24.1",
     "cors": "^2.8.5",

@@ -3,15 +3,31 @@ import { useChat } from "../hooks/useChat";
 import { motion, AnimatePresence } from "framer-motion";
 import { InlineVideoPlayer } from './InlineVideoPlayer';
 import { VideoPage } from './VideoPage';
+import ChatHistory from './ChatHistory';
+import { useQuery } from 'convex/react';
+import { api } from '../../../convex/_generated/api';
 
 export const UI = ({ hidden, showControls = true, showChat = true, ...props }) => {
   const input = useRef();
-  const { chat, loading, cameraZoomed, setCameraZoomed, message, chatHistory } = useChat();
+  const {  
+    chat, 
+    loading, 
+    cameraZoomed, 
+    setCameraZoomed, 
+    message, 
+    chatHistory,
+    currentSessionId,
+    setCurrentSessionId,
+    setChatHistory,
+    setCurrentConvexSessionId,
+    loadSessionMessages
+  } = useChat();
   const [isListening, setIsListening] = useState(false);
   const [isVideoMode, setIsVideoMode] = useState(false); // Default to Chat mode
   const [willCreateVideo, setWillCreateVideo] = useState(false); // Toggle for video creation
   const [expandedVideo, setExpandedVideo] = useState(null);
   const [expandedVideoSessionId, setExpandedVideoSessionId] = useState(null);
+  const [showVideoLibrary, setShowVideoLibrary] = useState(false);
   const recognition = useRef(null);
 
   // Initialize Web Speech API
@@ -78,6 +94,86 @@ export const UI = ({ hidden, showControls = true, showChat = true, ...props }) =
     }
   };
 
+  // Session management handlers
+  const handleNewChat = () => {
+    setCurrentSessionId(null);
+    setCurrentConvexSessionId(null);
+    setChatHistory([]);
+    setExpandedVideo(null);
+    setExpandedVideoSessionId(null);
+    setIsVideoMode(false);
+    if (input.current) {
+      input.current.value = "";
+    }
+    console.log('🆕 Starting new chat session');
+  };
+
+  const handleSelectSession = async (sessionId) => {
+    console.log('📂 Loading session:', sessionId);
+    
+    try {
+      // Fetch messages from Convex using the sessionId string
+      const messages = await fetch(`${import.meta.env.VITE_CONVEX_URL}/api/query`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          path: 'messages:getMessagesBySessionId',
+          args: { sessionId }
+        })
+      }).then(res => res.json());
+
+      console.log('� Loaded messages:', messages?.length || 0);
+
+      if (messages && messages.length > 0) {
+        // Transform Convex messages to chat history format
+        const formattedHistory = messages.map(msg => ({
+          type: msg.type, // "user" or "assistant"
+          text: msg.text,
+          videoUrl: msg.videoUrl,
+          videoGenerating: msg.videoStatus === "generating" || msg.videoStatus === "pending",
+          facialExpression: msg.facialExpression,
+          animation: msg.animation,
+          lipsync: msg.lipsyncData,
+          audio: null // Audio would need to be re-fetched if needed
+        }));
+
+        setChatHistory(formattedHistory);
+        
+        // Find the Convex session _id from the session string ID
+        // We'll need to query the session to get the _id
+        const sessionData = await fetch(`${import.meta.env.VITE_CONVEX_URL}/api/query`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            path: 'sessions:getSessionBySessionId',
+            args: { sessionId }
+          })
+        }).then(res => res.json());
+
+        if (sessionData?._id) {
+          setCurrentSessionId(sessionId);
+          setCurrentConvexSessionId(sessionData._id);
+          console.log('✅ Session loaded:', { sessionId, convexId: sessionData._id, messageCount: messages.length });
+        }
+      } else {
+        // Empty session or no messages yet
+        setCurrentSessionId(sessionId);
+        setCurrentConvexSessionId(null);
+        setChatHistory([]);
+        console.log('📭 Empty session selected');
+      }
+    } catch (error) {
+      console.error('❌ Error loading session messages:', error);
+      // Fallback: just set the session ID
+      setCurrentSessionId(sessionId);
+      setChatHistory([]);
+    }
+  };
+
+  const handleShowVideoLibrary = () => {
+    setShowVideoLibrary(!showVideoLibrary);
+  };
+
   if (hidden) {
     return null;
   }
@@ -103,6 +199,14 @@ export const UI = ({ hidden, showControls = true, showChat = true, ...props }) =
 
       {showChat && (
         <div className="h-full flex flex-col relative">
+          {/* ChatGPT-Style Sidebar */}
+          <ChatHistory
+            currentSessionId={currentSessionId}
+            onNewChat={handleNewChat}
+            onSelectSession={handleSelectSession}
+            onShowVideoLibrary={handleShowVideoLibrary}
+          />
+
           <motion.button
             onClick={() => {
               setIsVideoMode(!isVideoMode);
